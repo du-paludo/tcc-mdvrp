@@ -185,7 +185,8 @@ class LSMutation(Mutation):
                                      capacity_penalty=self.capacity_penalty,
                                      duration_penalty=self.duration_penalty)
             improved_segs = local_search(segments, self.depot, self.dist_fn,
-                                         self.local_search_max_iterations)
+                                         self.local_search_max_iterations,
+                                         self.capacity_penalty, self.duration_penalty)
 
             # Re-encode: flatten improved segments → integer permutation
             new_order = [c for route in improved_segs for c in route]
