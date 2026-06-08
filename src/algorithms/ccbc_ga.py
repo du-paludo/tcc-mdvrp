@@ -30,7 +30,7 @@ from utils.config import AppConfig, load_config
 from utils.reporting import print_cluster_summary
 from concurrent.futures import ProcessPoolExecutor
 
-_SEP = "─" * 78
+_SEP = "-" * 78
 
 class CCBCGAAlgorithm(ClusterFirstAlgorithm):
     """

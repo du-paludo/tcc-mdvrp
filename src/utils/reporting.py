@@ -18,7 +18,7 @@ from core.entities import Customer, Depot
 from core.solution import Solution
 from algorithms.ga_router import GADepotHistory
 
-_SEP = "─" * 78
+_SEP = "-" * 78
 
 
 def print_cluster_summary(
@@ -41,7 +41,7 @@ def print_cluster_summary(
     """
     total_customers = sum(len(c) for c in clusters.values())
     print(_SEP)
-    print(f"CCBC Cluster Summary  ({total_customers} customers → {len(clusters)} depots)")
+    print(f"CCBC Cluster Summary  ({total_customers} customers -> {len(clusters)} depots)")
     print(_SEP)
     any_infeasible = False
 
@@ -126,7 +126,7 @@ def print_solution_summary(solution: Solution) -> None:
                 dur_pct = 100 * r["duration"] / dur_limit
                 dur_str = f"{r['duration']:7.2f} / {dur_limit:.2f} ({dur_pct:6.1f}%)"
             else:
-                dur_str = f"{r['duration']:7.2f} / ∞"
+                dur_str = f"{r['duration']:7.2f} / inf"
             feasible_tag = "OK        " if (r["capacity_ok"] and r["duration_ok"]) else "INFEASIBLE"
             if not r["capacity_ok"]:
                 feasible_tag += " [cap]"
