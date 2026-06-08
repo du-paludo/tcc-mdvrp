@@ -24,7 +24,7 @@ from pymoo.termination.collection import TerminationCollection
 from pymoo.termination.default import DefaultSingleObjectiveTermination
 
 from core.entities import Customer, Depot, Route
-from utils.config import GAConfig
+from utils.config import GAConfig, LocalSearchConfig
 from algorithms.ga_split import linear_split
 from algorithms.ga_problems import RoutingProblem
 from algorithms.ga_operators import HeuristicSampling, LSMutation, WellSpacedSurvival
@@ -71,6 +71,7 @@ def run_ga_routing(
     customers: List[Customer],
     dist_fn: Callable[[int, int], float],
     cfg: GAConfig,
+    ls_cfg: LocalSearchConfig,
 ) -> Tuple[List[Route], GADepotHistory]:
     """
     Run GA to find the best visiting order for a depot's customers, then use
@@ -115,12 +116,14 @@ def run_ga_routing(
             customers=customers,
             dist_fn=dist_fn,
             prob=cfg.mutation_prob,
-            local_search_max_iterations=cfg.local_search_max_iterations,
+            local_search_max_iterations=ls_cfg.max_iterations,
             capacity_penalty=cfg.capacity_penalty,
             duration_penalty=cfg.duration_penalty,
+            granularity=ls_cfg.granularity,
         ),
         survival=WellSpacedSurvival(delta=cfg.clone_delta),
         eliminate_duplicates=True,
+        n_offsprings=cfg.n_offsprings,
     )
 
     result = minimize(

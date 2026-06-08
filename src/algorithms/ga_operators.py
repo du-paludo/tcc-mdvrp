@@ -158,6 +158,7 @@ class LSMutation(Mutation):
         local_search_max_iterations: int,
         capacity_penalty: float,
         duration_penalty: float,
+        granularity: int = 0,
     ) -> None:
         super().__init__(prob=prob)
         self.depot = depot
@@ -166,6 +167,7 @@ class LSMutation(Mutation):
         self.local_search_max_iterations = local_search_max_iterations
         self.capacity_penalty = capacity_penalty
         self.duration_penalty = duration_penalty
+        self.granularity = granularity
         # Map customer object → position in customers list for re-encoding
         self._customer_pos = {c: i for i, c in enumerate(customers)}
 
@@ -186,6 +188,7 @@ class LSMutation(Mutation):
                                      duration_penalty=self.duration_penalty)
             improved_segs = local_search(segments, self.depot, self.dist_fn,
                                          self.local_search_max_iterations,
+                                         granularity=self.granularity,
                                          self.capacity_penalty, self.duration_penalty)
 
             # Re-encode: flatten improved segments → integer permutation

@@ -81,7 +81,7 @@ class CCBCGAAlgorithm(ClusterFirstAlgorithm):
         print(_SEP)
         with ProcessPoolExecutor() as executor:
             futures = [
-                executor.submit(run_ga_routing, depot, customers, self._dist, self.cfg.ga)
+                executor.submit(run_ga_routing, depot, customers, self._dist, self.cfg.ga, self.cfg.local_search)
                 for depot, customers in clusters.items()
             ]
             results = [f.result() for f in futures]

@@ -2,19 +2,25 @@ ccbc:
   max_iter: 300
   tol: 1.0e-4
   n_starts: 5
+  capacity_balance_target: 0.95  # max depot capacity utilisation after clustering; depots above this shed customers to neighbours
+  duration_estimate_slack: 1.2  # NN-tour over-estimates the optimal tour; allow this factor above the duration budget before flagging/blocking (1.0 = no slack)
 
 ga:
   pop_size: 30       # Prins (2004): σ=30 optimal; larger hurts due to unproductive crossovers
-  n_gen: 200        # ~30,000 crossovers / σ=30 per Prins (2004) Christofides setting
+  n_gen: 100        # ~30,000 crossovers / σ=30 per Prins (2004) Christofides setting
   seed: 42
   mutation_prob: 0.15 # Prins (2004): pm up to 0.20; higher rate is fine with LS mutation
-  local_search_max_iterations: 100
   clone_delta: 1   # Vidal (2012): well-spaced spacing; two solutions are clones if floor(F/delta) matches
-  stagnation_period: 10   # sliding window size for early stopping (pymoo ftol period)
+  stagnation_period: 5   # sliding window size for early stopping (pymoo ftol period)
   stagnation_ftol: 1e-6   # absolute fitness tolerance; stop if best doesn't improve by this over stagnation_period gens
   time_limit: "00:05:00"  # per-depot GA wall-clock limit (HH:MM:SS); acts as a hard cap alongside n_gen and stagnation
   capacity_penalty: 10.0    # penalty per unit of excess capacity demand (same value used by the split)
   duration_penalty: 5.0     # penalty per unit of excess route duration (same value used by the split)
+  n_offsprings: 90          # number of offspring generated per generation
+
+local_search:
+  max_iterations: 1000
+  granularity: 20           # Prins (2004) / Vidal (2011) §4.5: number of nearest neighbors per customer in local search (0 = full O(n²))
 
 simulation:
   reroute_degradation_threshold: 1.20  # Stage-1 acceptance limit for reroute cost (e.g., 1.10 = +10%)

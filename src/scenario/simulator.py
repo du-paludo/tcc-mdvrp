@@ -44,6 +44,7 @@ class SimulationRuntimeSettings:
     reroute_degradation_threshold: float
     cluster_degradation_threshold: float
     local_search_max_iterations: int
+    granularity: int
     penalty_overcapacity_per_unit: float
     penalty_overtime_per_minute: float
 
@@ -53,7 +54,8 @@ def _build_runtime_settings(cfg: AppConfig) -> SimulationRuntimeSettings:
     return SimulationRuntimeSettings(
         reroute_degradation_threshold=float(cfg.simulation.reroute_degradation_threshold),
         cluster_degradation_threshold=float(cfg.simulation.cluster_degradation_threshold),
-        local_search_max_iterations=max(1, int(cfg.ga.local_search_max_iterations)),
+        local_search_max_iterations=max(1, int(cfg.local_search.max_iterations)),
+        granularity=int(cfg.local_search.granularity),
         penalty_overcapacity_per_unit=max(0.0, float(cfg.simulation.penalty_overcapacity_per_unit)),
         penalty_overtime_per_minute=max(0.0, float(cfg.simulation.penalty_overtime_per_minute)),
     )
@@ -497,6 +499,7 @@ def reoptimize_intra_cluster(
     current_time: float,
     blocked_edges: set[tuple[int, int]],
     local_search_max_iterations: int,
+    granularity: int,
     capacity_penalty: float,
     duration_penalty: float,
     cluster_degradation_threshold: float,
@@ -750,6 +753,7 @@ def reoptimize_intra_cluster(
             executed_capacity_by_route=executed_capacity_by_route,
             executed_duration_by_route=executed_duration_by_route,
             executed_last_nodes=executed_last_nodes,
+            granularity=granularity,
         )
 
         # 1:1 index mapping: with Stage-2 split disabled and empty routes
@@ -1760,6 +1764,7 @@ def _handle_disaster(
     reroute_degradation_threshold = runtime_settings.reroute_degradation_threshold
     cluster_degradation_threshold = runtime_settings.cluster_degradation_threshold
     local_search_max_iterations = runtime_settings.local_search_max_iterations
+    granularity = runtime_settings.granularity
     penalty_overcapacity_per_unit = runtime_settings.penalty_overcapacity_per_unit
     penalty_overtime_per_minute = runtime_settings.penalty_overtime_per_minute
 
@@ -1894,6 +1899,7 @@ def _handle_disaster(
             current_time=current_time,
             blocked_edges=blocked_edges,
             local_search_max_iterations=10000,
+            granularity=granularity,
             capacity_penalty=penalty_overcapacity_per_unit,
             duration_penalty=penalty_overtime_per_minute,
             cluster_degradation_threshold=cluster_degradation_threshold,
