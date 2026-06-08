@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
@@ -108,6 +109,22 @@ class RouteUpdate:
     future_only: bool
 
 
+@dataclass(frozen=True)
+class UTurnInfo:
+    route_id: int
+    from_node: int   # node the vehicle departed from
+    to_node: int     # blocked endpoint it was heading toward
+    edge_break_t: float  # time the edge broke (vehicle reaches to_node here)
+    elapsed: float   # time already spent on the edge = wasted_travel_time / 2
+
+
+@dataclass(frozen=True)
+class RerouteSnapshot:
+    time_minutes: float
+    plans: dict[int, tuple[int, list[int]]]  # route_id -> (depot_index, customers)
+    u_turns: tuple[UTurnInfo, ...]
+
+
 def _as_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -168,6 +185,159 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
         "payload",
     }
     return {k: v for k, v in event.items() if k not in ignore}
+
+
+def load_reroute_snapshots(results_dir: Path, instance_name: str) -> list[RerouteSnapshot]:
+    """Load all reroute result files for the given instance, sorted by time."""
+    snapshots: list[RerouteSnapshot] = []
+    for path in sorted(results_dir.glob(f"{instance_name}_reroute_*.json")):
+        with path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict):
+            continue
+        time_minutes = _as_float(
+            raw.get("metadata", {}).get("current_time_minutes")
+        )
+        if time_minutes is None:
+            continue
+        routes_data = raw.get("routes", [])
+        if not isinstance(routes_data, list):
+            continue
+        plans: dict[int, tuple[int, list[int]]] = {}
+        for route in routes_data:
+            if not isinstance(route, dict):
+                continue
+            route_id = _as_int(route.get("route_id"))
+            depot_index = _as_int(route.get("depot_index"))
+            if route_id is None or depot_index is None:
+                continue
+            raw_customers = route.get(
+                "customer_indices", route.get("customers", [])
+            )
+            customers = [
+                c for c in (_as_int(v) for v in (raw_customers or []))
+                if c is not None and c != depot_index
+            ]
+            plans[route_id] = (depot_index, customers)
+
+        # Detect U-turns: vehicles with nonzero wasted_travel_time on the broken edge
+        broken_edge_raw = raw.get("metadata", {}).get("broken_edge", [])
+        broken_edge = [n for n in (_as_int(x) for x in broken_edge_raw) if n is not None]
+        u_turns_list: list[UTurnInfo] = []
+        for vehicle in raw.get("vehicles", []):
+            if not isinstance(vehicle, dict):
+                continue
+            wasted = _as_float(vehicle.get("wasted_travel_time")) or 0.0
+            if wasted <= EPS:
+                continue
+            route_id = _as_int(vehicle.get("route_id"))
+            from_node = _as_int(vehicle.get("current_node_index"))
+            if route_id is None or from_node is None:
+                continue
+            if len(broken_edge) < 2 or from_node not in broken_edge:
+                continue
+            to_node = next((n for n in broken_edge if n != from_node), None)
+            if to_node is None:
+                continue
+            u_turns_list.append(UTurnInfo(
+                route_id=route_id,
+                from_node=from_node,
+                to_node=to_node,
+                edge_break_t=time_minutes,
+                elapsed=wasted / 2.0,
+            ))
+
+        snapshots.append(RerouteSnapshot(
+            time_minutes=time_minutes,
+            plans=plans,
+            u_turns=tuple(u_turns_list),
+        ))
+    snapshots.sort(key=lambda s: s.time_minutes)
+    return snapshots
+
+
+def _inject_u_turn_segments(
+    timelines: dict[int, list[Segment]],
+    u_turns: list[UTurnInfo],
+    positions: dict[int, tuple[float, float]],
+) -> None:
+    """Rewrite the relevant travel segment to show a physically correct U-turn.
+
+    The vehicle travels at normal speed from from_node toward to_node.  When
+    the edge breaks (edge_break_t), the vehicle is somewhere in the middle of
+    the edge.  A synthetic node is created at that exact position so the
+    interpolation in _vehicle_pose produces the correct on-edge location.
+
+    Replacement segments:
+        1. Outbound: from_node → mid_node  [departure_t … edge_break_t]
+           (mid_node is exactly elapsed time = elapsed distance away → normal speed)
+        2. Return:   mid_node  → from_node [edge_break_t … return_t]
+           (same distance back at normal speed)
+        3. Continuation: from_node → next_stop [return_t … original end]
+    """
+    synthetic_id = -1  # use negative IDs that never collide with real nodes
+    for u in u_turns:
+        timeline = timelines.get(u.route_id)
+        if not timeline:
+            continue
+        pos_from = positions.get(u.from_node)
+        pos_to = positions.get(u.to_node)
+        if pos_from is None or pos_to is None:
+            continue
+
+        dx = pos_to[0] - pos_from[0]
+        dy = pos_to[1] - pos_from[1]
+        full_edge_time = math.hypot(dx, dy)  # UNIT_SPEED = 1.0 unit/min
+        fraction = min(1.0, u.elapsed / full_edge_time) if full_edge_time > EPS else 0.0
+        mid_pos = (pos_from[0] + dx * fraction, pos_from[1] + dy * fraction)
+
+        # Register synthetic node for this mid-edge turnaround position
+        mid_node = synthetic_id
+        synthetic_id -= 1
+        positions[mid_node] = mid_pos
+
+        departure_t = u.edge_break_t - u.elapsed
+        return_t = u.edge_break_t + u.elapsed
+        new_timeline: list[Segment] = []
+        inserted = False
+        for seg in timeline:
+            if (
+                not inserted
+                and seg.kind == "travel"
+                and seg.from_node == u.from_node
+                and seg.start <= departure_t + 0.5
+                and seg.start >= departure_t - 0.5
+            ):
+                # 1. Outbound: travel to the actual on-edge position at normal speed
+                new_timeline.append(Segment(
+                    kind="travel",
+                    start=departure_t,
+                    end=u.edge_break_t,
+                    from_node=u.from_node,
+                    to_node=mid_node,
+                ))
+                # 2. Return: turn around from mid-edge back to from_node
+                new_timeline.append(Segment(
+                    kind="travel",
+                    start=u.edge_break_t,
+                    end=return_t,
+                    from_node=mid_node,
+                    to_node=u.from_node,
+                ))
+                # 3. Continuation toward the rerouted next stop
+                if seg.to_node is not None:
+                    new_timeline.append(Segment(
+                        kind="travel",
+                        start=return_t,
+                        end=seg.end,
+                        from_node=u.from_node,
+                        to_node=seg.to_node,
+                    ))
+                inserted = True
+            else:
+                new_timeline.append(seg)
+        if inserted:
+            timelines[u.route_id] = new_timeline
 
 
 def load_event_log(log_file: Path) -> tuple[dict[str, Any], list[TimedEvent]]:
@@ -263,6 +433,15 @@ def enrich_plans_from_events(
         for rid, plan in existing.items()
     }
 
+    # Customers already assigned in the loaded plans must not be re-added from
+    # arrival events, which may reflect post-reroute assignments and would cause
+    # the same customer to appear in two routes at time zero.
+    already_assigned: set[int] = {
+        customer
+        for plan in plans.values()
+        for customer in plan.customers
+    }
+
     for event in events:
         if event.event_type != "arrival":
             continue
@@ -281,8 +460,9 @@ def enrich_plans_from_events(
 
         if node_index is None or node_index == depot_index:
             continue
-        if node_index not in plan.customers:
+        if node_index not in already_assigned:
             plan.customers.append(node_index)
+            already_assigned.add(node_index)
 
     return plans
 
@@ -463,7 +643,7 @@ def resolve_paths(
     metadata: dict[str, Any],
     instance_file: Path | None,
     routes_file: Path | None,
-) -> tuple[str, Path, Path | None]:
+) -> tuple[str, Path, Path | None, list[RerouteSnapshot]]:
     instance_name = str(metadata.get("instance") or "").strip()
     if not instance_name:
         stem = log_file.stem
@@ -482,7 +662,10 @@ def resolve_paths(
         if candidate.exists():
             routes_file = candidate
 
-    return instance_name, instance_file, routes_file
+    results_dir = REPO_ROOT / "data" / "processed" / "results"
+    reroute_snapshots = load_reroute_snapshots(results_dir, instance_name)
+
+    return instance_name, instance_file, routes_file, reroute_snapshots
 
 
 class Visualizer:
@@ -502,6 +685,7 @@ class Visualizer:
         blocked_edge_ttl: float,
         max_blocked_edges: int,
         show_ids: bool,
+        reroute_snapshots: list[RerouteSnapshot] | None = None,
     ):
         self.instance_name = instance_name
         self.events = events
@@ -520,6 +704,8 @@ class Visualizer:
         self.paused = False
         self.event_index = 0
         self.blocked_edges: deque[BlockedEdgeRecord] = deque()
+        self.reroute_snapshots: list[RerouteSnapshot] = list(reroute_snapshots or [])
+        self.reroute_cursor: int = 0
 
         self._last_wall_time = time.perf_counter()
 
@@ -532,9 +718,10 @@ class Visualizer:
 
         self.fig, self.ax = plt.subplots(figsize=(13, 10))
         self.route_lines: dict[int, Any] = {}
+        self.route_lines_done: dict[int, Any] = {}
         self.vehicle_markers: dict[int, Any] = {}
         self.vehicle_labels: dict[int, Any] = {}
-        self.blocked_collection = LineCollection([], linewidths=2.2, zorder=4)
+        self.blocked_collection = LineCollection([], linewidths=3.0, linestyles="dashed", zorder=4)
         self.status_text = self.ax.text(
             0.01,
             0.99,
@@ -566,6 +753,7 @@ class Visualizer:
         blocked_edge_ttl: float,
         max_blocked_edges: int,
         show_ids: bool,
+        reroute_snapshots: list[RerouteSnapshot] | None = None,
     ) -> "Visualizer":
         instance = read_cordeau_data_file(str(instance_file))
 
@@ -586,6 +774,11 @@ class Visualizer:
             if plan.depot_index in positions
         }
         timelines = build_timelines(events, plans)
+
+        # Inject U-turn animation segments derived from reroute snapshots
+        all_u_turns = [u for snap in (reroute_snapshots or []) for u in snap.u_turns]
+        if all_u_turns:
+            _inject_u_turn_segments(timelines, all_u_turns, positions)
 
         runtimes: dict[int, RouteRuntime] = {}
         for route_id, plan in sorted(plans.items()):
@@ -618,6 +811,7 @@ class Visualizer:
             blocked_edge_ttl=blocked_edge_ttl,
             max_blocked_edges=max_blocked_edges,
             show_ids=show_ids,
+            reroute_snapshots=reroute_snapshots,
         )
 
     def _setup_axes(self) -> None:
@@ -626,15 +820,27 @@ class Visualizer:
         depot_x = [self.positions[index][0] for index in self.depot_ids if index in self.positions]
         depot_y = [self.positions[index][1] for index in self.depot_ids if index in self.positions]
 
-        self.ax.scatter(
+        # Customers are split into two dynamic scatter plots updated each frame.
+        # Both sit above routes (2) and blocked edges (4); vehicles sit above customers (10).
+        self._customer_unvisited = self.ax.scatter(
             customer_x,
             customer_y,
-            s=20,
-            c="#4c72b0",
-            alpha=0.75,
+            s=22,
+            facecolors="white",
+            edgecolors="#4c72b0",
+            linewidths=1.0,
+            alpha=1.0,
             marker="o",
             label="Customer",
-            zorder=1,
+            zorder=8,
+        )
+        self._customer_visited = self.ax.scatter(
+            [], [],
+            s=22,
+            c="#4c72b0",
+            alpha=1.0,
+            marker="o",
+            zorder=8,
         )
         self.ax.scatter(
             depot_x,
@@ -645,7 +851,7 @@ class Visualizer:
             edgecolors="black",
             linewidths=0.7,
             label="Depot",
-            zorder=3,
+            zorder=12,
         )
 
         self.ax.set_title(f"Simulation Log Animator - {self.instance_name}", fontsize=13)
@@ -665,10 +871,19 @@ class Visualizer:
             self.ax.set_ylim(min_y - margin_y, max_y + margin_y)
 
         legend_handles = [
-            Line2D([0], [0], color="#555555", lw=1.5, label="Planned route"),
-            Line2D([0], [0], marker="o", color="w", markerfacecolor="#2ca02c", markeredgecolor="black", markersize=8, label="Vehicle en-route"),
-            Line2D([0], [0], marker="s", color="w", markerfacecolor="#ff8c00", markeredgecolor="black", markersize=8, label="Vehicle servicing"),
-            Line2D([0], [0], color="#b22222", lw=2.2, label="Blocked edge"),
+            # Routes
+            Line2D([0], [0], color="#555555", lw=1.5, linestyle=":", label="Planned route (ahead)"),
+            Line2D([0], [0], color="#555555", lw=1.8, linestyle="-", label="Traversed route"),
+            Line2D([0], [0], color="#b22222", lw=2.2, linestyle="--", label="Blocked edge"),
+            # Customers
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="white", markeredgecolor="#4c72b0", markeredgewidth=1.0, markersize=7, label="Customer (pending)"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#4c72b0", markeredgecolor="none", markersize=7, label="Customer (visited)"),
+            # Depots
+            Line2D([0], [0], marker="*", color="w", markerfacecolor="#c44e52", markeredgecolor="black", markeredgewidth=0.7, markersize=11, label="Depot"),
+            # Vehicles
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#2ca02c", markeredgecolor="black", markeredgewidth=0.6, markersize=8, label="Vehicle (en-route)"),
+            Line2D([0], [0], marker="s", color="w", markerfacecolor="#ff8c00", markeredgecolor="black", markeredgewidth=0.6, markersize=8, label="Vehicle (servicing)"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#b0b0b0", markeredgecolor="black", markeredgewidth=0.6, markersize=8, label="Vehicle (idle)"),
         ]
         self.ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
 
@@ -677,7 +892,8 @@ class Visualizer:
 
         for route_id in self.route_ids:
             color = self.route_colors[route_id]
-            line, = self.ax.plot([], [], color=color, linewidth=1.5, alpha=0.55, zorder=2)
+            planned_line, = self.ax.plot([], [], color=color, linewidth=1.5, linestyle=":", alpha=0.55, zorder=2)
+            done_line, = self.ax.plot([], [], color=color, linewidth=1.8, linestyle="-", alpha=0.80, zorder=2)
             marker, = self.ax.plot(
                 [],
                 [],
@@ -687,9 +903,10 @@ class Visualizer:
                 markerfacecolor="#2ca02c",
                 markeredgecolor="black",
                 markeredgewidth=0.6,
-                zorder=6,
+                zorder=10,
             )
-            self.route_lines[route_id] = line
+            self.route_lines[route_id] = planned_line
+            self.route_lines_done[route_id] = done_line
             self.vehicle_markers[route_id] = marker
 
             if self.show_ids:
@@ -701,12 +918,13 @@ class Visualizer:
                     color="black",
                     ha="left",
                     va="bottom",
-                    zorder=7,
+                    zorder=11,
                 )
                 self.vehicle_labels[route_id] = label
 
     def _reset_dynamic_state(self) -> None:
         self.event_index = 0
+        self.reroute_cursor = 0
         self.blocked_edges.clear()
         for runtime in self.route_runtimes.values():
             runtime.visited_order.clear()
@@ -727,24 +945,63 @@ class Visualizer:
         self._apply_events_until(self.sim_time)
 
     def _apply_events_until(self, target_time: float) -> None:
-        while self.event_index < len(self.events):
-            event = self.events[self.event_index]
-            if event.time_minutes > target_time + EPS:
+        # Process log events and reroute snapshots in strict time order so that
+        # e.g. an edge_block at t=2.9 is always seen before the reroute snapshot
+        # at t=3.0, regardless of how large a time step the frame covers.
+        while True:
+            next_event_time = (
+                self.events[self.event_index].time_minutes
+                if self.event_index < len(self.events)
+                else float("inf")
+            )
+            next_reroute_time = (
+                self.reroute_snapshots[self.reroute_cursor].time_minutes
+                if self.reroute_cursor < len(self.reroute_snapshots)
+                else float("inf")
+            )
+
+            if next_event_time <= target_time + EPS and next_event_time <= next_reroute_time:
+                event = self.events[self.event_index]
+                if event.event_type == "edge_block":
+                    self._handle_edge_block(event)
+                elif event.event_type == "arrival":
+                    self._handle_arrival(event)
+                elif event.event_type in ROUTE_UPDATE_TYPES:
+                    self._handle_route_update(event)
+                self.event_index += 1
+            elif next_reroute_time <= target_time + EPS:
+                self._apply_reroute_snapshot(self.reroute_snapshots[self.reroute_cursor])
+                self.reroute_cursor += 1
+            else:
                 break
 
-            if event.event_type == "edge_block":
-                self._handle_edge_block(event)
-            elif event.event_type == "arrival":
-                self._handle_arrival(event)
-            elif event.event_type in ROUTE_UPDATE_TYPES:
-                self._handle_route_update(event)
-
-            self.event_index += 1
+    def _apply_reroute_snapshot(self, snapshot: RerouteSnapshot) -> None:
+        for route_id, (depot_index, customers) in snapshot.plans.items():
+            runtime = self.route_runtimes.get(route_id)
+            if runtime is None:
+                continue
+            if depot_index in self.positions:
+                runtime.plan.depot_index = depot_index
+            sanitized = [
+                c for c in customers
+                if c in self.positions and c != depot_index
+            ]
+            runtime.plan.customers = sanitized
 
     def _handle_edge_block(self, event: TimedEvent) -> None:
         node_a = _as_int(event.payload.get("node_a"))
         node_b = _as_int(event.payload.get("node_b"))
         if node_a is None or node_b is None:
+            return
+        # Only record the block if the edge is currently part of a planned route.
+        # Check now (before any reroute snapshot updates the plans) so the edge
+        # is still present in plan.customers.
+        planned: set[frozenset] = set()
+        for runtime in self.route_runtimes.values():
+            nodes = [runtime.plan.depot_index] + runtime.plan.customers + [runtime.plan.depot_index]
+            for i in range(len(nodes) - 1):
+                planned.add(frozenset({nodes[i], nodes[i + 1]}))
+        if frozenset({node_a, node_b}) not in planned:
             return
         self.blocked_edges.append(BlockedEdgeRecord(event.time_minutes, node_a, node_b))
 
@@ -844,36 +1101,52 @@ class Visualizer:
         pos = self.positions.get(node_index, depot_pos)
         return Pose(pos[0], pos[1], "service", node_index, None)
 
-    def _route_polyline(self, runtime: RouteRuntime, pose: Pose) -> tuple[list[float], list[float]]:
-        remaining = [
-            customer
-            for customer in runtime.plan.customers
-            if customer not in runtime.visited_set and customer in self.positions
-        ]
-
-        points: list[tuple[float, float]] = [(pose.x, pose.y)]
-        for customer in remaining:
-            points.append(self.positions[customer])
-
-        depot_pos = self.positions.get(runtime.plan.depot_index)
-        if depot_pos is not None:
-            if remaining or pose.current_node != runtime.plan.depot_index:
-                points.append(depot_pos)
-
+    @staticmethod
+    def _compact(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
         compact: list[tuple[float, float]] = []
         for point in points:
-            if not compact:
+            if not compact or math.hypot(point[0] - compact[-1][0], point[1] - compact[-1][1]) > 1e-9:
                 compact.append(point)
-                continue
-            prev = compact[-1]
-            if math.hypot(point[0] - prev[0], point[1] - prev[1]) > 1e-9:
-                compact.append(point)
+        return compact
 
-        if len(compact) < 2:
-            return [], []
-        xs = [point[0] for point in compact]
-        ys = [point[1] for point in compact]
-        return xs, ys
+    def _route_polylines(
+        self, runtime: RouteRuntime, pose: Pose
+    ) -> tuple[list[float], list[float], list[float], list[float]]:
+        depot_pos = self.positions.get(runtime.plan.depot_index)
+
+        # Traversed (solid): depot → visited nodes in order → current vehicle position
+        done_points: list[tuple[float, float]] = []
+        if depot_pos is not None:
+            done_points.append(depot_pos)
+        for node in runtime.visited_order:
+            if node in self.positions:
+                done_points.append(self.positions[node])
+        done_points.append((pose.x, pose.y))
+        done_compact = self._compact(done_points)
+
+        # Planned (dotted): current node → remaining unvisited customers → depot.
+        # plan.customers is updated by _apply_reroute_snapshot at the exact
+        # reroute time, so this always reflects the correct current plan.
+        current_node_pos = self.positions.get(pose.current_node, (pose.x, pose.y))
+        remaining = [
+            c for c in runtime.plan.customers
+            if c not in runtime.visited_set and c in self.positions
+        ]
+        plan_points: list[tuple[float, float]] = [current_node_pos]
+        for node in remaining:
+            plan_points.append(self.positions[node])
+        if depot_pos is not None and (remaining or pose.current_node != runtime.plan.depot_index):
+            plan_points.append(depot_pos)
+        plan_compact = self._compact(plan_points)
+
+        def to_xy(pts: list[tuple[float, float]]) -> tuple[list[float], list[float]]:
+            if len(pts) < 2:
+                return [], []
+            return [p[0] for p in pts], [p[1] for p in pts]
+
+        done_xs, done_ys = to_xy(done_compact)
+        plan_xs, plan_ys = to_xy(plan_compact)
+        return done_xs, done_ys, plan_xs, plan_ys
 
     def _refresh_blocked_edges(self) -> None:
         cutoff = self.sim_time - self.blocked_edge_ttl
@@ -901,9 +1174,10 @@ class Visualizer:
     def _refresh_artists(self) -> None:
         for route_id, runtime in self.route_runtimes.items():
             pose = self._vehicle_pose(runtime)
-            xs, ys = self._route_polyline(runtime, pose)
+            done_xs, done_ys, plan_xs, plan_ys = self._route_polylines(runtime, pose)
 
-            self.route_lines[route_id].set_data(xs, ys)
+            self.route_lines[route_id].set_data(plan_xs, plan_ys)
+            self.route_lines_done[route_id].set_data(done_xs, done_ys)
 
             marker = self.vehicle_markers[route_id]
             marker.set_data([pose.x], [pose.y])
@@ -921,6 +1195,7 @@ class Visualizer:
                 self.vehicle_labels[route_id].set_position((pose.x + 1.0, pose.y + 1.0))
 
         self._refresh_blocked_edges()
+        self._refresh_customer_markers()
 
         state = "PAUSED" if self.paused else "RUNNING"
         self.status_text.set_text(
@@ -938,6 +1213,30 @@ class Visualizer:
                 ]
             )
         )
+
+    def _refresh_customer_markers(self) -> None:
+        visited: set[int] = set()
+        for runtime in self.route_runtimes.values():
+            visited.update(runtime.visited_set)
+
+        unvisited_coords = [
+            self.positions[c] for c in self.customer_ids
+            if c in self.positions and c not in visited
+        ]
+        visited_coords = [
+            self.positions[c] for c in self.customer_ids
+            if c in self.positions and c in visited
+        ]
+
+        if unvisited_coords:
+            self._customer_unvisited.set_offsets(np.array(unvisited_coords))
+        else:
+            self._customer_unvisited.set_offsets(np.empty((0, 2)))
+
+        if visited_coords:
+            self._customer_visited.set_offsets(np.array(visited_coords))
+        else:
+            self._customer_visited.set_offsets(np.empty((0, 2)))
 
     def _on_key_press(self, event: Any) -> None:
         key = str(getattr(event, "key", "")).lower()
@@ -1054,7 +1353,7 @@ def main() -> int:
         raise FileNotFoundError(f"Log file not found: {log_file}")
 
     metadata, events = load_event_log(log_file)
-    instance_name, instance_file, routes_file = resolve_paths(
+    instance_name, instance_file, routes_file, reroute_snapshots = resolve_paths(
         log_file=log_file,
         metadata=metadata,
         instance_file=args.instance_file.resolve() if args.instance_file is not None else None,
@@ -1071,6 +1370,7 @@ def main() -> int:
         blocked_edge_ttl=args.blocked_edge_ttl,
         max_blocked_edges=args.max_blocked_edges,
         show_ids=args.show_ids,
+        reroute_snapshots=reroute_snapshots,
     )
 
     if args.start_time > 0.0:
