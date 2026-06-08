@@ -150,7 +150,7 @@ def run_ga_routing(
         customers=customers,
         dist_fn=dist_fn,
         prob=cfg.mutation_prob,
-        local_search_max_iterations=cfg.local_search_max_iterations,
+        local_search_max_iterations=ls_cfg.max_iterations,
         capacity_penalty=cfg.capacity_penalty,
         duration_penalty=cfg.duration_penalty,
         repair_prob=cfg.repair_prob,

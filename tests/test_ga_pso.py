@@ -226,7 +226,7 @@ class TestLocalSearch:
         routes = [Route(depot=ls_depot, customers=[customers[3], customers[0]]),
                   Route(depot=ls_depot, customers=[customers[2], customers[1]])]
         before = sum(_route_cost(r.customers, ls_depot, dfn) for r in routes)
-        improved = local_search(routes, ls_depot, dfn, local_search_max_iterations=200)
+        improved = local_search(routes, ls_depot, dfn, local_search_max_iterations=200, capacity_penalty=500.0, duration_penalty=500.0)
         after = sum(_route_cost(r, ls_depot, dfn) for r in improved)
         assert after <= before + 1e-9
 
@@ -235,7 +235,7 @@ class TestLocalSearch:
         customers, dfn = ls_nodes
         routes = [Route(depot=ls_depot, customers=[customers[0], customers[3]]),
                   Route(depot=ls_depot, customers=[customers[1], customers[2]])]
-        improved = local_search(routes, ls_depot, dfn, local_search_max_iterations=200)
+        improved = local_search(routes, ls_depot, dfn, local_search_max_iterations=200, capacity_penalty=500.0, duration_penalty=500.0)
         result_indices = [c.index for r in improved for c in r]
         expected_indices = sorted(c.index for c in customers)
         assert sorted(result_indices) == expected_indices
@@ -246,7 +246,7 @@ class TestLocalSearch:
         tight_depot = Depot(index=0, x=0.0, y=0.0, max_duration=0.0, max_capacity=10)
         routes = [Route(depot=tight_depot, customers=[customers[0], customers[1]]),
                   Route(depot=tight_depot, customers=[customers[2], customers[3]])]
-        improved = local_search(routes, tight_depot, dfn, local_search_max_iterations=200)
+        improved = local_search(routes, tight_depot, dfn, local_search_max_iterations=200, capacity_penalty=500.0, duration_penalty=500.0)
         for r in improved:
             assert sum(c.demand for c in r) <= tight_depot.max_capacity
 
@@ -254,14 +254,14 @@ class TestLocalSearch:
         """Local search must strip empty routes from its output."""
         customers, dfn = ls_nodes
         routes = [Route(depot=ls_depot, customers=[c]) for c in customers]
-        improved = local_search(routes, ls_depot, dfn, local_search_max_iterations=200)
+        improved = local_search(routes, ls_depot, dfn, local_search_max_iterations=200, capacity_penalty=500.0, duration_penalty=500.0)
         assert all(len(r) > 0 for r in improved)
 
     def test_single_route_stays_valid(self, ls_depot, ls_nodes):
         """A single feasible route should remain valid after LS."""
         customers, dfn = ls_nodes
         routes = [Route(depot=ls_depot, customers=list(customers))]
-        improved = local_search(routes, ls_depot, dfn, local_search_max_iterations=200)
+        improved = local_search(routes, ls_depot, dfn, local_search_max_iterations=200, capacity_penalty=500.0, duration_penalty=500.0)
         result_indices = sorted(c.index for r in improved for c in r)
         assert result_indices == sorted(c.index for c in customers)
 

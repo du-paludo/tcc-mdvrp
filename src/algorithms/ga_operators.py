@@ -209,8 +209,8 @@ class LSMutation(Mutation):
                                      duration_penalty=self.duration_penalty)
             improved_segs = local_search(segments, self.depot, self.dist_fn,
                                          self.local_search_max_iterations,
-                                         granularity=self.granularity,
-                                         self.capacity_penalty, self.duration_penalty)
+                                         self.capacity_penalty, self.duration_penalty,
+                                        granularity=self.granularity)
 
             # Vidal (2011) §4.5 Repair: if offspring is infeasible, re-run split+LS
             # with escalated penalties (×10, then ×100) to push toward feasibility.
