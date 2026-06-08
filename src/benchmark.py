@@ -79,7 +79,7 @@ def _row(r: _InstanceResult) -> str:
 
 def run_benchmark(instance_names: list[str]) -> None:
     cfg = load_config()
-    algorithm = CCBCGAAlgorithm(cfg)
+    algorithm = CCBCGAAlgorithm(cfg, debug=False)
 
     print(f"\nAlgorithm : {algorithm}")
     print(f"Instances : {len(instance_names)}\n")

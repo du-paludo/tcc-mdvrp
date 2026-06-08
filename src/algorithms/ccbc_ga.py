@@ -48,10 +48,11 @@ class CCBCGAAlgorithm(ClusterFirstAlgorithm):
         If omitted, config.yaml is loaded from the project root.
     """
 
-    def __init__(self, cfg: AppConfig | None = None) -> None:
+    def __init__(self, cfg: AppConfig | None = None, debug: bool = False) -> None:
         if cfg is None:
             cfg = load_config()
         self.cfg = cfg
+        self.debug = debug
         self.last_clusters: Dict[int, List[int]] = {}
         self.last_ga_history: List[GADepotHistory] = []
 
@@ -64,12 +65,14 @@ class CCBCGAAlgorithm(ClusterFirstAlgorithm):
             customers=customers,
             depots=depots,
             cfg=self.cfg.ccbc,
+            verbose=self.debug,
         )
         self.last_clusters = {
             depot.index: [customer.index for customer in assigned]
             for depot, assigned in clusters.items()
         }
-        # self._print_cluster_summary(clusters)
+        if self.debug:
+            self._print_cluster_summary(clusters)
         return clusters
 
     def _print_cluster_summary(self, clusters: Dict[Depot, List[Customer]]) -> None:
@@ -77,11 +80,12 @@ class CCBCGAAlgorithm(ClusterFirstAlgorithm):
 
     def route(self, clusters: Dict[Depot, List[Customer]]) -> Solution:
         """Phase 2: optimise visiting order and vehicle split per depot via GA."""
-        # print(f"Starting GA routing for {len(clusters)} depots...")
-        # print(_SEP)
+        if self.debug:
+            print(f"Starting GA routing for {len(clusters)} depots...")
+            print(_SEP)
         with ProcessPoolExecutor() as executor:
             futures = [
-                executor.submit(run_ga_routing, depot, customers, self._dist, self.cfg.ga, self.cfg.local_search)
+                executor.submit(run_ga_routing, depot, customers, self._dist, self.cfg.ga, self.cfg.local_search, self.debug)
                 for depot, customers in clusters.items()
             ]
             results = [f.result() for f in futures]

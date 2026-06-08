@@ -481,6 +481,7 @@ def _repair_duration_overloads(
     clusters: Dict[Depot, List[Customer]],
     depots: List[Depot],
     duration_estimate_slack: float = 1.0,
+    verbose: bool = False,
 ) -> None:
     """
     Relocate customers from duration-overloaded depots.
@@ -502,7 +503,8 @@ def _repair_duration_overloads(
         d.index: sum(c.demand for c in clusters[d]) for d in depots
     }
 
-    # print("[repair_duration] starting pass")
+    if verbose:
+        print("[repair_duration] starting pass")
     improved = True
     while improved:
         improved = False
@@ -529,11 +531,12 @@ def _repair_duration_overloads(
             est_dur += euclidean_distance(px, py, src_depot.x, src_depot.y)
 
             dur_bud = duration_budget[src_depot.index]
-            # print(
-            #     f"[repair_duration] depot {src_depot.index} | customers: {len(tour)} "
-            #     f"| est_dur: {est_dur:.1f} / {dur_bud:.1f} (slack={duration_estimate_slack}) "
-            #     f"({'OVER' if est_dur > dur_bud * duration_estimate_slack else 'ok'})"
-            # )
+            if verbose:
+                print(
+                    f"[repair_duration] depot {src_depot.index} | customers: {len(tour)} "
+                    f"| est_dur: {est_dur:.1f} / {dur_bud:.1f} (slack={duration_estimate_slack}) "
+                    f"({'OVER' if est_dur > dur_bud * duration_estimate_slack else 'ok'})"
+                )
 
             if est_dur <= dur_bud * duration_estimate_slack:
                 continue
@@ -572,10 +575,11 @@ def _repair_duration_overloads(
                     if dst.max_duration > 0:
                         est_dst = _estimate_tour_duration(dst, clusters[dst] + [c])
                         if est_dst > duration_budget[dst.index] * duration_estimate_slack:
-                            # print(
-                            #     f"[repair_duration]   customer {c.index} -> depot {dst.index} blocked: "
-                            #     f"dst_est_dur {est_dst:.1f} > budget {duration_budget[dst.index]:.1f} * slack {duration_estimate_slack}"
-                            # )
+                            if verbose:
+                                print(
+                                    f"[repair_duration]   customer {c.index} -> depot {dst.index} blocked: "
+                                    f"dst_est_dur {est_dst:.1f} > budget {duration_budget[dst.index]:.1f} * slack {duration_estimate_slack}"
+                                )
                             skip_reasons["dur"] += 1
                             continue
                     best_gain = removal_gain
@@ -583,30 +587,33 @@ def _repair_duration_overloads(
                     best_dst = dst
                     break
 
-            # print(
-            #     f"[repair_duration]   candidate skips — same_depot: {skip_reasons['same_depot']} "
-            #     f"| cap_full: {skip_reasons['cap']} | dur_full: {skip_reasons['dur']}"
-            # )
+            if verbose:
+                print(
+                    f"[repair_duration]   candidate skips — same_depot: {skip_reasons['same_depot']} "
+                    f"| cap_full: {skip_reasons['cap']} | dur_full: {skip_reasons['dur']}"
+                )
 
             if best_customer is not None and best_dst is not None:
-                # print(
-                #     f"[repair_duration]   moving customer {best_customer.index} "
-                #     f"(demand={best_customer.demand}) from depot {src_depot.index} "
-                #     f"-> depot {best_dst.index} (gain={best_gain:.2f})"
-                # )
+                if verbose:
+                    print(
+                        f"[repair_duration]   moving customer {best_customer.index} "
+                        f"(demand={best_customer.demand}) from depot {src_depot.index} "
+                        f"-> depot {best_dst.index} (gain={best_gain:.2f})"
+                    )
                 clusters[src_depot].remove(best_customer)
                 clusters[best_dst].append(best_customer)
                 demand_by_depot[src_depot.index] -= best_customer.demand
                 demand_by_depot[best_dst.index] += best_customer.demand
                 improved = True
-            # else:
-                # print(f"[repair_duration]   no eligible move found for depot {src_depot.index} — stuck")
+            elif verbose:
+                print(f"[repair_duration]   no eligible move found for depot {src_depot.index} — stuck")
 
 
 def run_ccbc_clustering(
     customers: List[Customer],
     depots: List[Depot],
     cfg: CCBCConfig,
+    verbose: bool = False,
 ) -> Dict[Depot, List[Customer]]:
     """
     Assign customers to depots via Constrained Centroid-Based Clustering (CCBC).
@@ -718,6 +725,6 @@ def run_ccbc_clustering(
     # Runs last so it operates on the already capacity-balanced assignment;
     # its moves check capacity before committing, so they cannot re-create
     # capacity violations.
-    _repair_duration_overloads(clusters, depots, cfg.duration_estimate_slack)
+    _repair_duration_overloads(clusters, depots, cfg.duration_estimate_slack, verbose=verbose)
 
     return clusters

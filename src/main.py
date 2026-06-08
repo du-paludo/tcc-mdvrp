@@ -72,7 +72,7 @@ def main() -> int:
     cfg = load_config()
 
     # Run CCBC+GA algorithm
-    algorithm = CCBCGAAlgorithm(cfg)
+    algorithm = CCBCGAAlgorithm(cfg, debug=True)
     t_start = time.perf_counter()
     solution = algorithm.solve(customers, depots)
     elapsed = time.perf_counter() - t_start
