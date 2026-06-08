@@ -39,6 +39,9 @@ class GAConfig:
     capacity_penalty: float
     duration_penalty: float
     n_offsprings: int
+    repair_prob: float
+    feasibility_target: float
+    penalty_adjustment_period: int
 
 
 @dataclass
@@ -98,6 +101,9 @@ def load_config(path: Optional[str] = None) -> AppConfig:
             time_limit=str(ga_raw["time_limit"]),
             capacity_penalty=float(ga_raw["capacity_penalty"]),
             duration_penalty=float(ga_raw["duration_penalty"]),
+            repair_prob=float(ga_raw["repair_prob"]),
+            feasibility_target=float(ga_raw["feasibility_target"]),
+            penalty_adjustment_period=int(ga_raw["penalty_adjustment_period"]),
             n_offsprings=int(ga_raw["n_offsprings"]),
         ),
         local_search=LocalSearchConfig(

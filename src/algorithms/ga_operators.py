@@ -15,7 +15,26 @@ from pymoo.core.survival import Survival
 
 from core.entities import Customer, Depot
 from algorithms.ga_split import linear_split
-from algorithms.ga_local_search import local_search
+from algorithms.ga_local_search import local_search, _route_cost
+
+
+def _is_infeasible(
+    segs: List[List[Customer]],
+    depot: Depot,
+    dist_fn: Callable[[int, int], float],
+) -> bool:
+    """Return True if any route violates capacity, duration, or fleet-size constraints."""
+    if len(segs) > depot.max_vehicles:
+        return True
+    for seg in segs:
+        if sum(c.demand for c in seg) > depot.max_capacity:
+            return True
+        if depot.max_duration > 0:
+            travel = _route_cost(seg, depot, dist_fn)
+            service = sum(c.service_time for c in seg)
+            if travel + service > depot.max_duration:
+                return True
+    return False
 
 
 def _nearest_neighbor_permutation(
@@ -158,6 +177,7 @@ class LSMutation(Mutation):
         local_search_max_iterations: int,
         capacity_penalty: float,
         duration_penalty: float,
+        repair_prob: float = 0.0,
         granularity: int = 0,
     ) -> None:
         super().__init__(prob=prob)
@@ -167,6 +187,7 @@ class LSMutation(Mutation):
         self.local_search_max_iterations = local_search_max_iterations
         self.capacity_penalty = capacity_penalty
         self.duration_penalty = duration_penalty
+        self.repair_prob = repair_prob
         self.granularity = granularity
         # Map customer object → position in customers list for re-encoding
         self._customer_pos = {c: i for i, c in enumerate(customers)}
@@ -190,6 +211,29 @@ class LSMutation(Mutation):
                                          self.local_search_max_iterations,
                                          granularity=self.granularity,
                                          self.capacity_penalty, self.duration_penalty)
+
+            # Vidal (2011) §4.5 Repair: if offspring is infeasible, re-run split+LS
+            # with escalated penalties (×10, then ×100) to push toward feasibility.
+            if (
+                self.repair_prob > 0.0
+                and _is_infeasible(improved_segs, self.depot, self.dist_fn)
+                and rng.random() < self.repair_prob
+            ):
+                repair_order = [c for route in improved_segs for c in route]
+                cap10 = self.capacity_penalty * 10.0
+                dur10 = self.duration_penalty * 10.0
+                repaired = linear_split(repair_order, self.depot, self.dist_fn,
+                                        capacity_penalty=cap10, duration_penalty=dur10)
+                repaired = local_search(repaired, self.depot, self.dist_fn,
+                                        self.local_search_max_iterations, cap10, dur10)
+                if _is_infeasible(repaired, self.depot, self.dist_fn):
+                    cap100 = self.capacity_penalty * 100.0
+                    dur100 = self.duration_penalty * 100.0
+                    repaired = linear_split(repair_order, self.depot, self.dist_fn,
+                                            capacity_penalty=cap100, duration_penalty=dur100)
+                    repaired = local_search(repaired, self.depot, self.dist_fn,
+                                            self.local_search_max_iterations, cap100, dur100)
+                improved_segs = repaired
 
             # Re-encode: flatten improved segments → integer permutation
             new_order = [c for route in improved_segs for c in route]

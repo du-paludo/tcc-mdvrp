@@ -69,7 +69,7 @@ class CCBCGAAlgorithm(ClusterFirstAlgorithm):
             depot.index: [customer.index for customer in assigned]
             for depot, assigned in clusters.items()
         }
-        self._print_cluster_summary(clusters)
+        # self._print_cluster_summary(clusters)
         return clusters
 
     def _print_cluster_summary(self, clusters: Dict[Depot, List[Customer]]) -> None:
@@ -77,8 +77,8 @@ class CCBCGAAlgorithm(ClusterFirstAlgorithm):
 
     def route(self, clusters: Dict[Depot, List[Customer]]) -> Solution:
         """Phase 2: optimise visiting order and vehicle split per depot via GA."""
-        print(f"Starting GA routing for {len(clusters)} depots...")
-        print(_SEP)
+        # print(f"Starting GA routing for {len(clusters)} depots...")
+        # print(_SEP)
         with ProcessPoolExecutor() as executor:
             futures = [
                 executor.submit(run_ga_routing, depot, customers, self._dist, self.cfg.ga, self.cfg.local_search)

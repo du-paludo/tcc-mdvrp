@@ -31,15 +31,58 @@ from algorithms.ga_operators import HeuristicSampling, LSMutation, WellSpacedSur
 
 
 class _ProgressCallback(Callback):
-    """Prints a compact progress line every `interval` generations."""
+    """Prints a compact progress line every `interval` generations.
 
-    def __init__(self, depot_index: int, n_gen: int, interval: int = 5) -> None:
+    Also implements Vidal (2011) §4.6 dynamic penalty adjustment: every
+    ``penalty_adjustment_period`` new evaluations the feasibility ratio over
+    that window is compared to ``feasibility_target`` (ξ^REF = 0.2).  If the
+    ratio drifts more than 0.05 from the target the capacity and duration
+    penalties are scaled up (×1.2) or down (×0.85) on both the problem and
+    the mutation operator so future offspring are guided toward the target
+    feasibility level.
+    """
+
+    def __init__(
+        self,
+        depot_index: int,
+        n_gen: int,
+        problem: "RoutingProblem",
+        mutation: "LSMutation",
+        feasibility_target: float,
+        penalty_adjustment_period: int,
+        interval: int = 5,
+    ) -> None:
         super().__init__()
         self.depot_index = depot_index
         self.n_gen = n_gen
+        self.problem = problem
+        self.mutation = mutation
+        self.feasibility_target = feasibility_target
+        self.penalty_adjustment_period = penalty_adjustment_period
         self.interval = interval
+        self._last_total: int = 0
+        self._last_feasible: int = 0
 
     def notify(self, algorithm) -> None:
+        # §4.6 Dynamic penalty adjustment
+        current_total = self.problem.total_evaluated
+        delta_total = current_total - self._last_total
+        if delta_total >= self.penalty_adjustment_period:
+            delta_feasible = self.problem.feasible_seen - self._last_feasible
+            ratio = delta_feasible / delta_total
+            if ratio < self.feasibility_target - 0.05:
+                self.problem.capacity_penalty *= 1.2
+                self.problem.duration_penalty *= 1.2
+                self.mutation.capacity_penalty *= 1.2
+                self.mutation.duration_penalty *= 1.2
+            elif ratio > self.feasibility_target + 0.05:
+                self.problem.capacity_penalty *= 0.85
+                self.problem.duration_penalty *= 0.85
+                self.mutation.capacity_penalty *= 0.85
+                self.mutation.duration_penalty *= 0.85
+            self._last_total = current_total
+            self._last_feasible = self.problem.feasible_seen
+
         gen = algorithm.n_gen
         if gen % self.interval != 0 and not algorithm.termination.has_terminated():
             return
@@ -102,6 +145,18 @@ def run_ga_routing(
     problem = RoutingProblem(depot=depot, customers=customers, dist_fn=dist_fn,
                              capacity_penalty=cfg.capacity_penalty, duration_penalty=cfg.duration_penalty)
 
+    mutation = LSMutation(
+        depot=depot,
+        customers=customers,
+        dist_fn=dist_fn,
+        prob=cfg.mutation_prob,
+        local_search_max_iterations=cfg.local_search_max_iterations,
+        capacity_penalty=cfg.capacity_penalty,
+        duration_penalty=cfg.duration_penalty,
+        repair_prob=cfg.repair_prob,
+        granularity=ls_cfg.granularity,
+    )
+
     algorithm = GA(
         pop_size=cfg.pop_size,
         sampling=HeuristicSampling(
@@ -111,16 +166,7 @@ def run_ga_routing(
             n_heuristic=max(1, cfg.pop_size // 5),
         ),
         crossover=OrderCrossover(),
-        mutation=LSMutation(
-            depot=depot,
-            customers=customers,
-            dist_fn=dist_fn,
-            prob=cfg.mutation_prob,
-            local_search_max_iterations=ls_cfg.max_iterations,
-            capacity_penalty=cfg.capacity_penalty,
-            duration_penalty=cfg.duration_penalty,
-            granularity=ls_cfg.granularity,
-        ),
+        mutation=mutation,
         survival=WellSpacedSurvival(delta=cfg.clone_delta),
         eliminate_duplicates=True,
         n_offsprings=cfg.n_offsprings,
@@ -140,7 +186,14 @@ def run_ga_routing(
         seed=cfg.seed,
         save_history=True,
         verbose=False,
-        callback=_ProgressCallback(depot_index=depot.index, n_gen=cfg.n_gen),
+        callback=_ProgressCallback(
+            depot_index=depot.index,
+            n_gen=cfg.n_gen,
+            problem=problem,
+            mutation=mutation,
+            feasibility_target=cfg.feasibility_target,
+            penalty_adjustment_period=cfg.penalty_adjustment_period,
+        ),
     )
     print()  # newline after the last \r update
 
@@ -158,4 +211,5 @@ def run_ga_routing(
 
     ordered_customers = [customers[i] for i in result.X.astype(int)]
     return linear_split(ordered_customers, depot, dist_fn,
-                         capacity_penalty=cfg.capacity_penalty, duration_penalty=cfg.duration_penalty), history
+                         capacity_penalty=problem.capacity_penalty,
+                         duration_penalty=problem.duration_penalty), history

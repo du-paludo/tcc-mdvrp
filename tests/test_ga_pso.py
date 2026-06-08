@@ -72,6 +72,9 @@ def ga_cfg() -> GAConfig:
         capacity_penalty=500.0,
         duration_penalty=500.0,
         n_offsprings=10,
+        repair_prob=0.5,
+        feasibility_target=0.2,
+        penalty_adjustment_period=100,
     )
 
 

@@ -17,6 +17,9 @@ ga:
   capacity_penalty: 10.0    # penalty per unit of excess capacity demand (same value used by the split)
   duration_penalty: 5.0     # penalty per unit of excess route duration (same value used by the split)
   n_offsprings: 90          # number of offspring generated per generation
+  repair_prob: 0.50         # Vidal (2011) §4.5: probability of applying repair to infeasible offspring (P_rep)
+  feasibility_target: 0.20  # Vidal (2011) §4.6: target proportion of feasible evaluations (ξ^REF)
+  penalty_adjustment_period: 100  # Vidal (2011) §4.6: adjust penalties every N evaluations
 
 local_search:
   max_iterations: 1000
