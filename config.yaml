@@ -11,11 +11,11 @@ ga:
   seed: 42
   mutation_prob: 0.15 # Prins (2004): pm up to 0.20; higher rate is fine with LS mutation
   clone_delta: 1   # Vidal (2012): well-spaced spacing; two solutions are clones if floor(F/delta) matches
-  stagnation_period: 5   # sliding window size for early stopping (pymoo ftol period)
+  stagnation_period: 10   # sliding window size for early stopping (pymoo ftol period)
   stagnation_ftol: 1e-6   # absolute fitness tolerance; stop if best doesn't improve by this over stagnation_period gens
   time_limit: "00:05:00"  # per-depot GA wall-clock limit (HH:MM:SS); acts as a hard cap alongside n_gen and stagnation
-  capacity_penalty: 10.0    # penalty per unit of excess capacity demand (same value used by the split)
-  duration_penalty: 5.0     # penalty per unit of excess route duration (same value used by the split)
+  capacity_penalty: 40.0    # penalty per unit of excess capacity demand (same value used by the split)
+  duration_penalty: 20.0     # penalty per unit of excess route duration (same value used by the split)
   n_offsprings: 90          # number of offspring generated per generation
   repair_prob: 0.50         # Vidal (2011) §4.5: probability of applying repair to infeasible offspring (P_rep)
   feasibility_target: 0.20  # Vidal (2011) §4.6: target proportion of feasible evaluations (ξ^REF)

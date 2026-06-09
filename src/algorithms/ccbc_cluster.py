@@ -55,6 +55,7 @@ from utils.metrics import euclidean_distance
 # TODO: replace to use config seed
 _RNG_SEED = 42
 _OUTLIER_REASSIGN_DISTANCE_DELTA = 5.0
+_OUTLIER_REASSIGN_DISTANCE_DELTA = 5.0
 
 def _build_slots(depots: List[Depot]) -> Tuple[List[Depot], List[float], List[float]]:
     """
@@ -374,7 +375,7 @@ def _repair_capacity_imbalance(
                 demand_by_depot[best_dst.index] += best_customer.demand
                 improved = True
 
-def _repair_cross_depot_outliers(
+def _repair_cross_depot_outliers_new(
     clusters: Dict[Depot, List[Customer]],
     depots: List[Depot],
     duration_estimate_slack: float = 1.0,
@@ -714,17 +715,93 @@ def run_ccbc_clustering(
     # Pass 1: reassign strong geometric outliers to their nearest depot.
     # Runs first so the capacity and duration passes operate on a geometrically
     # clean assignment.
-    _repair_cross_depot_outliers(clusters, depots, cfg.duration_estimate_slack)
+    _repair_cross_depot_outliers(clusters, depots)
+    # _repair_cross_depot_outliers_new(clusters, depots, cfg.duration_estimate_slack)
 
     # Pass 2: shed customers from depots above the capacity utilisation target.
     # Runs before duration repair so the duration pass sees a balanced load and
     # its moves are not later disturbed by capacity rebalancing.
-    _repair_capacity_imbalance(clusters, depots, cfg.capacity_balance_target, cfg.duration_estimate_slack)
+    # _repair_capacity_imbalance(clusters, depots, cfg.capacity_balance_target, cfg.duration_estimate_slack)
 
     # Pass 3: move customers out of duration-overloaded depots.
     # Runs last so it operates on the already capacity-balanced assignment;
     # its moves check capacity before committing, so they cannot re-create
     # capacity violations.
-    _repair_duration_overloads(clusters, depots, cfg.duration_estimate_slack, verbose=verbose)
+    # _repair_duration_overloads(clusters, depots, cfg.duration_estimate_slack)
 
     return clusters
+
+
+def _repair_cross_depot_outliers(
+    clusters: Dict[Depot, List[Customer]],
+    depots: List[Depot],
+) -> None:
+    depot_by_idx = {depot.index: depot for depot in depots}
+    customer_by_idx = {
+        customer.index: customer
+        for assigned in clusters.values()
+        for customer in assigned
+    }
+
+    capacity_budget = {
+        depot.index: depot.max_capacity * max(1, depot.max_vehicles)
+        for depot in depots
+    }
+    demand_by_depot = {
+        depot.index: sum(customer.demand for customer in clusters[depot])
+        for depot in depots
+    }
+
+    assigned_depot_by_customer: Dict[int, int] = {}
+    for depot, assigned in clusters.items():
+        for customer in assigned:
+            assigned_depot_by_customer[customer.index] = depot.index
+
+    candidates: List[tuple[float, int, int, int]] = []
+    for customer_idx, src_depot_idx in assigned_depot_by_customer.items():
+        customer = customer_by_idx[customer_idx]
+        src_depot = depot_by_idx[src_depot_idx]
+        src_dist = euclidean_distance(customer.x, customer.y, src_depot.x, src_depot.y)
+
+        nearest_depot = min(
+            depots,
+            key=lambda depot: euclidean_distance(customer.x, customer.y, depot.x, depot.y),
+        )
+        if nearest_depot.index == src_depot_idx:
+            continue
+
+        nearest_dist = euclidean_distance(
+            customer.x,
+            customer.y,
+            nearest_depot.x,
+            nearest_depot.y,
+        )
+        distance_gain = src_dist - nearest_dist
+        if distance_gain >= _OUTLIER_REASSIGN_DISTANCE_DELTA:
+            candidates.append((distance_gain, customer_idx, src_depot_idx, nearest_depot.index))
+
+    candidates.sort(reverse=True)
+
+    for _, customer_idx, src_depot_idx, dst_depot_idx in candidates:
+        if assigned_depot_by_customer.get(customer_idx) != src_depot_idx:
+            continue
+
+        customer = customer_by_idx[customer_idx]
+        if demand_by_depot[dst_depot_idx] + customer.demand > capacity_budget[dst_depot_idx] + 1e-9:
+            continue
+
+        src_depot = depot_by_idx[src_depot_idx]
+        dst_depot = depot_by_idx[dst_depot_idx]
+
+        src_list = clusters[src_depot]
+        for pos, item in enumerate(src_list):
+            if item.index == customer_idx:
+                src_list.pop(pos)
+                break
+        else:
+            continue
+
+        clusters[dst_depot].append(customer)
+        assigned_depot_by_customer[customer_idx] = dst_depot_idx
+        demand_by_depot[src_depot_idx] -= customer.demand
+        demand_by_depot[dst_depot_idx] += customer.demand

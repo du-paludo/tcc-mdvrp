@@ -9,7 +9,7 @@ from utils.config import load_config
 from utils.converter import load_instance
 from utils.data_loader import read_cordeau_data_file, read_cordeau_solution_file, read_failures_file
 from utils.reporting import print_solution_summary, print_run_summary, print_simulation_validation
-from utils.results_io import save_clustering_result, save_routing_result
+from utils.results_io import load_routing_result_as_solution, save_clustering_result, save_routing_result
 from utils.visualizer import visualize_comparison, visualize_solution, visualize_ga_convergence
 from scenario.simulator import SIMULATION_LOG_DIR, run_simulation
 from tools.validate_simulation_log import validate_simulation_log
@@ -28,6 +28,15 @@ def main() -> int:
         help="Path to the failures JSON file (default: auto-detected for the selected instance).",
     )
     parser.add_argument(
+        "--routes-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a precomputed routes JSON (same format as data/processed/results/*_routes.json). "
+            "If provided, skips clustering/routing and runs only simulation on these routes."
+        ),
+    )
+    parser.add_argument(
         "--no-simulate",
         action="store_true",
         default=False,
@@ -44,6 +53,23 @@ def main() -> int:
     data_file = base_dir / "data" / "raw" / "cordeau" / args.instance
     solution_file = base_dir / "data" / "raw" / "cordeau_sol" / f"{args.instance}.res"
     failures_dir = base_dir / "data" / "processed" / "failures"
+    results_dir = base_dir / "data" / "processed" / "results"
+
+    if args.routes_file is not None:
+        provided_routes = Path(args.routes_file)
+        if provided_routes.is_absolute():
+            routes_file = provided_routes
+        elif provided_routes.exists():
+            routes_file = provided_routes
+        elif (base_dir / provided_routes).exists():
+            routes_file = base_dir / provided_routes
+        else:
+            routes_file = results_dir / provided_routes.name
+        if not routes_file.exists():
+            raise FileNotFoundError(f"Routes file not found: {routes_file}")
+    else:
+        routes_file = None
+
     if args.failures_file is not None:
         provided_failures = Path(args.failures_file)
         if provided_failures.is_absolute():
@@ -71,42 +97,59 @@ def main() -> int:
 
     cfg = load_config()
 
-    # Run CCBC+GA algorithm
+    # Always instantiate the algorithm because simulation rerouting depends on it.
     algorithm = CCBCGAAlgorithm(cfg, debug=True)
-    t_start = time.perf_counter()
-    solution = algorithm.solve(customers, depots)
-    elapsed = time.perf_counter() - t_start
 
-    visualize_ga_convergence(algorithm.last_ga_history)
+    if routes_file is not None:
+        print(f"Using precomputed routes from: {routes_file}")
+        t_start = time.perf_counter()
+        solution = load_routing_result_as_solution(routes_file, customers, depots)
+        elapsed = time.perf_counter() - t_start
+        ga_history = []
+        algorithm_repr = f"{algorithm} [precomputed-routes]"
+        clustering_file = "(skipped)"
+        routing_file = str(routes_file)
+    else:
+        # Run CCBC+GA algorithm
+        t_start = time.perf_counter()
+        solution = algorithm.solve(customers, depots)
+        elapsed = time.perf_counter() - t_start
 
-    results_dir = base_dir / "data" / "processed" / "results"
-    clustering_file = results_dir / f"{data_file.name}_clusters.json"
-    routing_file = results_dir / f"{data_file.name}_routes.json"
+        ga_history = algorithm.last_ga_history
+        algorithm_repr = str(algorithm)
 
-    save_clustering_result(
-        output_path=str(clustering_file), 
-        instance_name=data_file.name,
-        algorithm_name=str(algorithm),
-        clusters=algorithm.last_clusters,
-    )
-    save_routing_result(
-        output_path=str(routing_file),
-        instance_name=data_file.name,
-        algorithm_name=str(algorithm),
-        solution=solution,
-    )
+        visualize_ga_convergence(ga_history)
+
+        clustering_path = results_dir / f"{data_file.name}_clusters.json"
+        routing_path = results_dir / f"{data_file.name}_routes.json"
+
+        save_clustering_result(
+            output_path=str(clustering_path),
+            instance_name=data_file.name,
+            algorithm_name=str(algorithm),
+            clusters=algorithm.last_clusters,
+        )
+        save_routing_result(
+            output_path=str(routing_path),
+            instance_name=data_file.name,
+            algorithm_name=str(algorithm),
+            solution=solution,
+        )
+
+        clustering_file = str(clustering_path)
+        routing_file = str(routing_path)
 
     print_solution_summary(solution)
 
     print_run_summary(
         solution=solution,
         elapsed=elapsed,
-        ga_history=algorithm.last_ga_history,
+        ga_history=ga_history,
         clone_delta=cfg.ga.clone_delta,
         reference_cost=reference_solution.objective if reference_solution else None,
-        algorithm_repr=str(algorithm),
-        clustering_file=str(clustering_file),
-        routing_file=str(routing_file),
+        algorithm_repr=algorithm_repr,
+        clustering_file=clustering_file,
+        routing_file=routing_file,
     )
 
     # Visualize
@@ -157,6 +200,17 @@ def main() -> int:
         validation_result = validate_simulation_log(log_path)
         blocked_edge_violations = validation_result["blocked_edge_violations"]
         unserved_customers = validation_result["unserved_customers"]
+
+        try:
+            log_path_for_cmd = Path(".") / log_path.resolve().relative_to(base_dir.resolve())
+        except ValueError:
+            log_path_for_cmd = log_path
+        log_arg = str(log_path_for_cmd).replace("/", "\\")
+
+        print("\nTo animate the simulation log, run the following command:")
+        print(
+            f"python3 .\\src\\tools\\animate_simulation_log.py --log-file {log_arg}"
+        )
 
         print_simulation_validation(validation_result, log_path)
 

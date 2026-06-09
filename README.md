@@ -86,6 +86,57 @@ Certifique-se de ter o seguinte instalado em seu sistema:
 python3 src/main.py
 ```
 
+## Animação do log de simulação
+
+Para visualizar a execução da simulação no tempo (rotas, veículos, clientes
+visitados e arestas bloqueadas), use o animador de logs.
+
+Comando recomendado (wrapper):
+
+```sh
+python3 .\src\tools\animate_simulation_log.py --log-file .\data\processed\simulation_logs\p01_log.json
+```
+
+Observação: o wrapper tenta executar automaticamente com o Python da `venv`
+(`venv/Scripts/python.exe` ou `.venv/Scripts/python.exe`) quando necessário.
+
+### Exemplo com parâmetros
+
+```sh
+python3 .\src\tools\animate_simulation_log.py \
+  --log-file .\data\processed\simulation_logs\p21_log.json \
+  --fps 30 \
+  --speed 8.0 \
+  --blocked-edge-ttl 45 \
+  --max-blocked-edges 600 \
+  --show-ids
+```
+
+### Dry-run (sem abrir janela)
+
+```sh
+python3 .\src\tools\animate_simulation_log.py --log-file .\data\processed\simulation_logs\p21_log.json --dry-run
+```
+
+### Controles de teclado durante a animação
+
+- `space`: play/pause
+- `up` / `down`: aumenta/diminui velocidade
+- `left` / `right`: volta/avança 5 minutos
+
+### Parâmetros principais
+
+- `--log-file`: arquivo de log da simulação (obrigatório)
+- `--instance-file`: caminho explícito da instância Cordeau (opcional)
+- `--routes-file`: arquivo de rotas iniciais (opcional)
+- `--fps`: taxa de renderização (padrão: `30`)
+- `--speed`: velocidade inicial em minutos por segundo (padrão: `8.0`)
+- `--start-time`: tempo inicial da simulação (padrão: `0.0`)
+- `--blocked-edge-ttl`: tempo de vida visual de arestas bloqueadas (padrão: `45`)
+- `--max-blocked-edges`: máximo de arestas bloqueadas desenhadas (padrão: `600`)
+- `--show-ids`: mostra identificadores das rotas ao lado dos veículos
+- `--dry-run`: valida/parsa os arquivos e imprime resumo sem abrir a animação
+
 ## Geração de falhas em JSON
 
 O script [src/scenario/generate_failures.py](src/scenario/generate_failures.py)

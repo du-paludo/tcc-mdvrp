@@ -83,6 +83,9 @@ class RouteRuntime:
     visited_order: list[int] = field(default_factory=list)
     visited_set: set[int] = field(default_factory=set)
     timeline_cursor: int = 0
+    remaining_customers_cache: list[int] = field(default_factory=list)
+    remaining_cache_valid: bool = False
+    done_prefix_points: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -707,6 +710,26 @@ class Visualizer:
         self.reroute_snapshots: list[RerouteSnapshot] = list(reroute_snapshots or [])
         self.reroute_cursor: int = 0
 
+        self._customer_id_order = [
+            customer_id for customer_id in self.customer_ids if customer_id in self.positions
+        ]
+        if self._customer_id_order:
+            self._customer_coords = np.array(
+                [self.positions[customer_id] for customer_id in self._customer_id_order],
+                dtype=float,
+            )
+        else:
+            self._customer_coords = np.empty((0, 2), dtype=float)
+        self._customer_index_by_id = {
+            customer_id: idx for idx, customer_id in enumerate(self._customer_id_order)
+        }
+        self._customer_visited_mask = np.zeros(len(self._customer_id_order), dtype=bool)
+        self._customers_dirty = True
+        self._empty_offsets = np.empty((0, 2), dtype=float)
+
+        self._planned_edges_cache: set[frozenset[int]] = set()
+        self._planned_edges_dirty = True
+
         self._last_wall_time = time.perf_counter()
 
         self.route_ids = sorted(route_runtimes)
@@ -715,6 +738,12 @@ class Visualizer:
             route_id: cmap(index % 20)
             for index, route_id in enumerate(self.route_ids)
         }
+
+        for runtime in self.route_runtimes.values():
+            runtime.remaining_customers_cache.clear()
+            runtime.remaining_cache_valid = False
+            depot_pos = self.positions.get(runtime.plan.depot_index)
+            runtime.done_prefix_points = [depot_pos] if depot_pos is not None else []
 
         self.fig, self.ax = plt.subplots(figsize=(13, 10))
         self.route_lines: dict[int, Any] = {}
@@ -815,8 +844,8 @@ class Visualizer:
         )
 
     def _setup_axes(self) -> None:
-        customer_x = [self.positions[index][0] for index in self.customer_ids if index in self.positions]
-        customer_y = [self.positions[index][1] for index in self.customer_ids if index in self.positions]
+        customer_x = self._customer_coords[:, 0].tolist() if len(self._customer_coords) else []
+        customer_y = self._customer_coords[:, 1].tolist() if len(self._customer_coords) else []
         depot_x = [self.positions[index][0] for index in self.depot_ids if index in self.positions]
         depot_y = [self.positions[index][1] for index in self.depot_ids if index in self.positions]
 
@@ -885,7 +914,16 @@ class Visualizer:
             Line2D([0], [0], marker="s", color="w", markerfacecolor="#ff8c00", markeredgecolor="black", markeredgewidth=0.6, markersize=8, label="Vehicle (servicing)"),
             Line2D([0], [0], marker="o", color="w", markerfacecolor="#b0b0b0", markeredgecolor="black", markeredgewidth=0.6, markersize=8, label="Vehicle (idle)"),
         ]
-        self.ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
+        # Keep legend outside the axes so it never blocks the animated map.
+        self.fig.subplots_adjust(right=0.74)
+        self.ax.legend(
+            handles=legend_handles,
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            borderaxespad=0.0,
+            fontsize=8,
+            framealpha=0.95,
+        )
 
     def _init_artists(self) -> None:
         self.ax.add_collection(self.blocked_collection)
@@ -922,16 +960,53 @@ class Visualizer:
                 )
                 self.vehicle_labels[route_id] = label
 
+    def _mark_route_plan_dirty(self, runtime: RouteRuntime) -> None:
+        runtime.remaining_cache_valid = False
+        self._planned_edges_dirty = True
+
+    def _current_planned_edges(self) -> set[frozenset[int]]:
+        if not self._planned_edges_dirty:
+            return self._planned_edges_cache
+
+        planned: set[frozenset[int]] = set()
+        for runtime in self.route_runtimes.values():
+            nodes = [runtime.plan.depot_index] + runtime.plan.customers + [runtime.plan.depot_index]
+            for idx in range(len(nodes) - 1):
+                planned.add(frozenset({nodes[idx], nodes[idx + 1]}))
+
+        self._planned_edges_cache = planned
+        self._planned_edges_dirty = False
+        return planned
+
+    def _remaining_customers(self, runtime: RouteRuntime) -> list[int]:
+        if runtime.remaining_cache_valid:
+            return runtime.remaining_customers_cache
+
+        runtime.remaining_customers_cache = [
+            customer
+            for customer in runtime.plan.customers
+            if customer not in runtime.visited_set and customer in self.positions
+        ]
+        runtime.remaining_cache_valid = True
+        return runtime.remaining_customers_cache
+
     def _reset_dynamic_state(self) -> None:
         self.event_index = 0
         self.reroute_cursor = 0
         self.blocked_edges.clear()
+        self._planned_edges_dirty = True
+        self._customer_visited_mask.fill(False)
+        self._customers_dirty = True
         for runtime in self.route_runtimes.values():
             runtime.visited_order.clear()
             runtime.visited_set.clear()
             runtime.timeline_cursor = 0
             runtime.plan.depot_index = runtime.base_depot_index
             runtime.plan.customers = list(runtime.base_customers)
+            runtime.remaining_customers_cache.clear()
+            runtime.remaining_cache_valid = False
+            depot_pos = self.positions.get(runtime.plan.depot_index)
+            runtime.done_prefix_points = [depot_pos] if depot_pos is not None else []
 
     def set_time(self, new_time: float) -> None:
         bounded_time = min(max(0.0, new_time), self.total_time)
@@ -980,13 +1055,19 @@ class Visualizer:
             runtime = self.route_runtimes.get(route_id)
             if runtime is None:
                 continue
-            if depot_index in self.positions:
+            plan_changed = False
+            if depot_index in self.positions and runtime.plan.depot_index != depot_index:
                 runtime.plan.depot_index = depot_index
+                plan_changed = True
             sanitized = [
                 c for c in customers
                 if c in self.positions and c != depot_index
             ]
-            runtime.plan.customers = sanitized
+            if runtime.plan.customers != sanitized:
+                runtime.plan.customers = sanitized
+                plan_changed = True
+            if plan_changed:
+                self._mark_route_plan_dirty(runtime)
 
     def _handle_edge_block(self, event: TimedEvent) -> None:
         node_a = _as_int(event.payload.get("node_a"))
@@ -996,11 +1077,7 @@ class Visualizer:
         # Only record the block if the edge is currently part of a planned route.
         # Check now (before any reroute snapshot updates the plans) so the edge
         # is still present in plan.customers.
-        planned: set[frozenset] = set()
-        for runtime in self.route_runtimes.values():
-            nodes = [runtime.plan.depot_index] + runtime.plan.customers + [runtime.plan.depot_index]
-            for i in range(len(nodes) - 1):
-                planned.add(frozenset({nodes[i], nodes[i + 1]}))
+        planned = self._current_planned_edges()
         if frozenset({node_a, node_b}) not in planned:
             return
         self.blocked_edges.append(BlockedEdgeRecord(event.time_minutes, node_a, node_b))
@@ -1016,8 +1093,9 @@ class Visualizer:
         if runtime is None:
             return
 
-        if depot_index is not None:
+        if depot_index is not None and depot_index != runtime.plan.depot_index:
             runtime.plan.depot_index = depot_index
+            self._mark_route_plan_dirty(runtime)
 
         if node_index == runtime.plan.depot_index:
             return
@@ -1025,6 +1103,16 @@ class Visualizer:
         if node_index not in runtime.visited_set:
             runtime.visited_set.add(node_index)
             runtime.visited_order.append(node_index)
+            runtime.remaining_cache_valid = False
+
+            point = self.positions.get(node_index)
+            if point is not None:
+                runtime.done_prefix_points.append(point)
+
+            customer_idx = self._customer_index_by_id.get(node_index)
+            if customer_idx is not None and not self._customer_visited_mask[customer_idx]:
+                self._customer_visited_mask[customer_idx] = True
+                self._customers_dirty = True
 
     def _handle_route_update(self, event: TimedEvent) -> None:
         for update in extract_route_updates(event.payload):
@@ -1032,8 +1120,15 @@ class Visualizer:
             if runtime is None:
                 continue
 
-            if update.depot_index is not None and update.depot_index in self.positions:
+            plan_changed = False
+
+            if (
+                update.depot_index is not None
+                and update.depot_index in self.positions
+                and update.depot_index != runtime.plan.depot_index
+            ):
                 runtime.plan.depot_index = update.depot_index
+                plan_changed = True
 
             sanitized = [
                 customer
@@ -1044,11 +1139,18 @@ class Visualizer:
             if update.future_only:
                 prefix = [customer for customer in runtime.visited_order if customer != runtime.plan.depot_index]
                 prefix_set = set(prefix)
-                runtime.plan.customers = prefix + [
+                new_customers = prefix + [
                     customer for customer in sanitized if customer not in prefix_set
                 ]
             else:
-                runtime.plan.customers = sanitized
+                new_customers = sanitized
+
+            if runtime.plan.customers != new_customers:
+                runtime.plan.customers = new_customers
+                plan_changed = True
+
+            if plan_changed:
+                self._mark_route_plan_dirty(runtime)
 
     def _vehicle_pose(self, runtime: RouteRuntime) -> Pose:
         depot_index = runtime.plan.depot_index
@@ -1118,9 +1220,8 @@ class Visualizer:
         done_points: list[tuple[float, float]] = []
         if depot_pos is not None:
             done_points.append(depot_pos)
-        for node in runtime.visited_order:
-            if node in self.positions:
-                done_points.append(self.positions[node])
+        if runtime.done_prefix_points:
+            done_points.extend(runtime.done_prefix_points[1:])
         done_points.append((pose.x, pose.y))
         done_compact = self._compact(done_points)
 
@@ -1128,10 +1229,7 @@ class Visualizer:
         # plan.customers is updated by _apply_reroute_snapshot at the exact
         # reroute time, so this always reflects the correct current plan.
         current_node_pos = self.positions.get(pose.current_node, (pose.x, pose.y))
-        remaining = [
-            c for c in runtime.plan.customers
-            if c not in runtime.visited_set and c in self.positions
-        ]
+        remaining = self._remaining_customers(runtime)
         plan_points: list[tuple[float, float]] = [current_node_pos]
         for node in remaining:
             plan_points.append(self.positions[node])
@@ -1215,28 +1313,25 @@ class Visualizer:
         )
 
     def _refresh_customer_markers(self) -> None:
-        visited: set[int] = set()
-        for runtime in self.route_runtimes.values():
-            visited.update(runtime.visited_set)
+        if not self._customers_dirty:
+            return
 
-        unvisited_coords = [
-            self.positions[c] for c in self.customer_ids
-            if c in self.positions and c not in visited
-        ]
-        visited_coords = [
-            self.positions[c] for c in self.customer_ids
-            if c in self.positions and c in visited
-        ]
+        if len(self._customer_coords) == 0:
+            self._customer_unvisited.set_offsets(self._empty_offsets)
+            self._customer_visited.set_offsets(self._empty_offsets)
+            self._customers_dirty = False
+            return
 
-        if unvisited_coords:
-            self._customer_unvisited.set_offsets(np.array(unvisited_coords))
-        else:
-            self._customer_unvisited.set_offsets(np.empty((0, 2)))
+        unvisited_coords = self._customer_coords[~self._customer_visited_mask]
+        visited_coords = self._customer_coords[self._customer_visited_mask]
 
-        if visited_coords:
-            self._customer_visited.set_offsets(np.array(visited_coords))
-        else:
-            self._customer_visited.set_offsets(np.empty((0, 2)))
+        self._customer_unvisited.set_offsets(
+            unvisited_coords if len(unvisited_coords) else self._empty_offsets
+        )
+        self._customer_visited.set_offsets(
+            visited_coords if len(visited_coords) else self._empty_offsets
+        )
+        self._customers_dirty = False
 
     def _on_key_press(self, event: Any) -> None:
         key = str(getattr(event, "key", "")).lower()
